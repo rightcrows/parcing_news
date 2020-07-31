@@ -1,11 +1,8 @@
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.by import By
-from selenium import webdriver
-from selenium.common.exceptions import *
+from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from datetime import datetime
 import csv
-import time
+import requests
 
 
 def open_csv_file(path):
@@ -21,74 +18,79 @@ def open_csv_file(path):
             print('Файл невозможно открыть!')
 
 
-def add_proxy(capabilities):
-    """ Функция для добавления прокси в браузер.
-    Вызов этой функции закоментил, так как не стал
-    искать подходящий ip для прокси.
-    :param capabilities: настройки браузера
-    :return: измененные настройки браузера
-    """
-    proxy = ''  # Ip для прокси
-    capabilities['marionette'] = True
-    capabilities['proxy'] = {
-        "proxyType": "MANUAL",
-        "httpProxy": proxy,
-        "ftpProxy": proxy,
-        "sslProxy": proxy
-    }
-
-
-def get_html_from_element(url, xpath):
+def get_html_from_element(url, tag, attr, value):
     """ Функция для получения html кода web-элемента, найденного
     с помощью его xPath в url странице.
-    :param url: web-адрес ресурса в сети
-    :param xpath: путь к web-элементу, у которого нужно получить html-код.
+    :param url: web-адрес ресурса в сети.
+    :param tag: тэг, у которого нужно получить html-код.
+    :param attr: аттрибут тэга, которого нужно найти.
+    :param value: значение аттрибута.
     :return: html-код пригодный для дальнейшего парсинга под soup4
     """
     while True:
         try:
-            driver.get(url)
-            html_selenium = driver.find_element(By.XPATH, xpath).get_attribute('innerHTML')
-            return BeautifulSoup(html_selenium, "html.parser")
+            response = requests.get(url, timeout=(10, 0.2), headers={'User-Agent': UserAgent().chrome})
+            html_page = BeautifulSoup(response.text, "html.parser")
+            return html_page.find(tag, {attr: value})
         except Exception as ex:
-            input(ex)
-            print('Страница не загружена! Проверьте интернет подключение или настройки прокси!')
+            print(ex)
+            print('Страница не загружена! Проверьте интернет-соединение или настройки прокси!')
 
 
-def parcing_comments(name_article):
-    """ Функция парсит комментарии на странице со статьей. Собираются:
-    имя автора, дата публикации, текст собщения и было ли кому-то отправлено ответом.
-    Также фиксируется название статьи в записи, чтобы была связь комментария со статьей.
-    :param name_article: название статьи, на странице которой парсятся комментарии.
-    :return: ничего, по окончанию парсинга странице все комментарии записываются в
-    csv файл.
+def parcing_comments(name_article, url):
+    """ Функция парсит комментарии на странице статьи.
+    :param name_article: название статьи.
+    :param url: ссылка на статью.
     """
-    # Пролистывание страницы до блока с комментариями и нажатие на "еще комментарии"
-    action.move_to_element(driver.find_element_by_id("zkn_comments")).perform()
-    time.sleep(1)
-    while True:
-        try:
-            driver.find_element(By.XPATH, '//a[@class="zknc znkc-load-more-link"]').click()
-        except NoSuchElementException:
-            break
-        except (ElementClickInterceptedException, StaleElementReferenceException):
-            pass
+    # Заголовок и данные для post-запроса, чтобы получить комментарии
+    headers = {
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': url,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.105 Safari/537.36',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+    id_article = url.split('news/')[1].split('-')[0]
+    payload = {'page_title': name_article,
+               'page_url': url,
+               'block_code': 'zakonnewsid' + id_article
+               }
 
-    # Получение html кода блока, в котором хранятся комменты
-    html_with_comments = BeautifulSoup(driver.page_source, "html.parser").find('div', {'class': 'zknc zknc-posts'})
+    # url для загрузки с сервера комментарии
+    comment_url = 'https://zcomments.net/service/init/1'
 
-    # Получение списка комментарий и его разбиение на каждый по отдельности
-    list_comments = html_with_comments.find_all('div', {'class': 'zknc zknc-item'})
-    for comment in list_comments:
-        # Парсинг комментарий
-        name_author = comment.find('a', {'class': 'zknc zknc-author-name'}).text
-        date_publication = comment.find('span', {'class': 'zknc zknc-date'})['title']
-        message = comment.find('div', {'class': 'zknc zknc-message'}).text
-        answer = comment.find('span', {'class': 'zknc zknc-answer-to'}).text
-        if '»' in answer:
-            answer = answer.split('»  ')[1]
-        writer_comments.writerow({'name_author': name_author, 'date_publication': date_publication,
-                        'text_comment': message, 'answer_to': answer, 'name_article': name_article})
+    # Загрузка комментарий с сервера по статье
+    with requests.Session() as session:
+        response = session.post(comment_url, headers=headers, data=payload)
+
+    # Парсинг комментарий
+    for comment in response.json()['comments']['items']:
+        parcing_comment(comment, id_article)
+
+
+def parcing_comment(comment, id_article):
+    """ Парсит комментарий, если есть ответы на этот комментарий,
+    отправляет их на парсинг.
+    :param comment: комментарий для парсинга.
+    :param id_article: id статьи, в котором расположен комментарий.
+    """
+    print('Имя автора:', comment['user_nick'])
+    print('ID автора:', comment['user_id'])
+    print('Дата публикации:', comment['created_at'])
+    print('ID комментария:', comment['id'])
+    print('Комментарий:', comment['message'])
+    print('Ответ к комментарию ID:', comment['answer_to_comment_id'])
+    print('Понравилось людям:', comment['vote'])
+    print('Количество голосов:', comment['likes'])
+    print('ID новости:', id_article)
+    print('-----------------------------')
+    writer_comments.writerow({'name_author': comment['user_nick'], 'id_author': comment['user_id'],
+                              'date_publication': comment['created_at'], 'id_comment': comment['id'],
+                              'text_comment': comment['message'], 'answer_to': comment['answer_to_comment_id'],
+                              'likes': comment['vote'], 'vote': comment['likes'], 'id_article': id_article})
+    if comment['children']:
+        for comment_children in comment['children']:
+            parcing_comment(comment_children, id_article)
 
 
 # Открытие csv файла, и использование класса DictWriter, для записи данных в поток в виде словаря
@@ -97,16 +99,10 @@ fieldnames = ['name_article', 'date_publication', 'text_article', 'count_comment
 writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
 writer.writeheader()
 csv_file_comments = open_csv_file('comments.csv')
-fieldnames_comments = ['name_author', 'date_publication', 'text_comment', 'answer_to', 'name_article']
+fieldnames_comments = ['name_author', 'id_author', 'date_publication', 'id_comment',
+                       'text_comment', 'answer_to', 'likes', 'vote', 'id_article']
 writer_comments = csv.DictWriter(csv_file_comments, fieldnames=fieldnames_comments)
 writer_comments.writeheader()
-
-# Вытаскивание настройк браузера для добавления прокси и инициализация самого браузера
-caps = webdriver.DesiredCapabilities.CHROME
-# add_proxy(caps)
-driver = webdriver.Chrome(desired_capabilities=caps)
-action = ActionChains(driver)
-driver.implicitly_wait(1)
 
 # Вытаскивание сегодняшней даты в строковом формате, понадобится в дальнейшем парсинге,
 #   для получения полной даты публикации новости.
@@ -114,7 +110,7 @@ day_publication = datetime.today().strftime("%Y-%m-%d")
 
 # Получение html-кода web-элемента, хранящий список публикаций на сайте.
 site = 'https://www.zakon.kz/news'
-html_with_news = get_html_from_element(site, '//div[@id="dle-content"]')
+html_with_news = get_html_from_element(site, 'div', 'id', 'dle-content')
 
 # Получение списка публикаций и его разбиение на каждую по отдельности
 list_news = html_with_news.find_all('div', {'class': 'cat_news_item'})
@@ -133,7 +129,7 @@ for news in list_news:
     text_article = ''
 
     # Получение html-кода web-элемента, хранящий текст статьи.
-    html_article = get_html_from_element(site + href_article, '//div[@class="fullnews white_block"]')
+    html_article = get_html_from_element(site + href_article, 'div', 'class', 'fullnews white_block')
 
     # Получение всех дочерних элементов и
     children = html_article.findChildren()
@@ -151,12 +147,16 @@ for news in list_news:
     str_date = day_publication + ' ' + time_publication
     datetime_publication = datetime.strptime(str_date, '%Y-%m-%d %H:%M')
 
+    print('Название статьи:', name)
+    print('Время публикации:', datetime_publication)
+    print('Текст статьи:', text_article)
+    print('Количество комментарий:', count_commentaries)
     # Запись в csv файл
     writer.writerow({'name_article': name, 'date_publication': datetime_publication,
                      'text_article': text_article, 'count_commentaries': count_commentaries})
 
     # Парсинг комментарий, если есть хотя бы один комментарий
-    parcing_comments(name) if count_commentaries > 0 else None
+    parcing_comments(name, site + href_article) if count_commentaries > 0 else None
+    print('========================================')
 csv_file_comments.close()
 csv_file.close()
-driver.close()
